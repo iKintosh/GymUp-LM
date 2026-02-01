@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gymup-tracker"
+version = "0.1.0"
+description = "AI-powered workout analysis and weight progression recommendations for GymUp data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Your Name", email = "you@example.com" }
+]
+dependencies = [
+    "streamlit>=1.31.0",
+    "sqlalchemy>=2.0",
+    "plotly>=5.18",
+    "click>=8.1",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "httpx>=0.26",
+    "rich>=13.7",
+    "pandas>=2.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+gymup-tracker = "gymup_tracker.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gymup_tracker"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+]
