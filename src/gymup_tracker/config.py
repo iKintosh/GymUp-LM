@@ -19,9 +19,9 @@ class LLMSettings(BaseSettings):
     """LLM configuration for Ollama."""
 
     base_url: str = "http://localhost:11434"
-    model: str = "mistral:7b"
+    model: str = "qwen2.5:7b-instruct"  # Best for instruction following + math
     temperature: float = 0.3
-    max_tokens: int = 500
+    max_tokens: int = 800  # Increased for detailed workout plans
     timeout: int = 120  # Increased timeout for model loading
     fallback_to_rules: bool = True
 

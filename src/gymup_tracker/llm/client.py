@@ -1,12 +1,34 @@
 """Ollama API client for LLM integration."""
 
 import json
+import re
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional
 
 import httpx
 
 from gymup_tracker.config import settings
+
+
+def strip_thinking_tags(text: str) -> str:
+    """
+    Strip thinking tags from model output.
+
+    Qwen3, DeepSeek, and other "thinking" models wrap their reasoning in tags like:
+    <think>...</think> or <thinking>...</thinking>
+
+    This function removes these tags and their content, returning only the final answer.
+    """
+    # Remove <think>...</think> blocks (Qwen3 style)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # Remove <thinking>...</thinking> blocks
+    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    # Remove standalone closing tags that might remain
+    text = re.sub(r'</think>', '', text)
+    text = re.sub(r'</thinking>', '', text)
+    # Clean up extra whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 @dataclass
@@ -98,8 +120,12 @@ class OllamaClient:
                 response.raise_for_status()
                 data = response.json()
 
+                raw_content = data.get("response", "")
+                # Strip thinking tags from models like Qwen3
+                clean_content = strip_thinking_tags(raw_content)
+
                 return LLMResponse(
-                    content=data.get("response", ""),
+                    content=clean_content,
                     model=data.get("model", self.model),
                     done=data.get("done", True),
                     total_duration=data.get("total_duration"),
@@ -143,8 +169,12 @@ class OllamaClient:
                 data = response.json()
 
                 message = data.get("message", {})
+                raw_content = message.get("content", "")
+                # Strip thinking tags from models like Qwen3
+                clean_content = strip_thinking_tags(raw_content)
+
                 return LLMResponse(
-                    content=message.get("content", ""),
+                    content=clean_content,
                     model=data.get("model", self.model),
                     done=data.get("done", True),
                     total_duration=data.get("total_duration"),

@@ -284,16 +284,37 @@ def create_1rm_trajectory_chart(
         )
     )
 
-    # Trend line through historical
+    # Trend line through historical (linear regression using numpy)
     if len(hist_dates) >= 2:
-        fig.add_trace(
-            go.Scatter(
-                x=hist_dates, y=hist_1rm,
-                mode="lines",
-                name="Trend",
-                line=dict(color="#4CAF50", width=2, dash="dash"),
+        import numpy as np
+
+        # Convert dates to numeric values for regression
+        x = np.arange(len(hist_dates))
+        y = np.array(hist_1rm)
+
+        # Linear regression: y = slope * x + intercept
+        n = len(x)
+        sum_x = np.sum(x)
+        sum_y = np.sum(y)
+        sum_xy = np.sum(x * y)
+        sum_x2 = np.sum(x * x)
+
+        denominator = n * sum_x2 - sum_x * sum_x
+        if denominator != 0:
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
+            intercept = (sum_y - slope * sum_x) / n
+
+            # Generate trend line points
+            trend_1rm = slope * x + intercept
+
+            fig.add_trace(
+                go.Scatter(
+                    x=hist_dates, y=trend_1rm,
+                    mode="lines",
+                    name="Trend Line",
+                    line=dict(color="#4CAF50", width=2, dash="dash"),
+                )
             )
-        )
 
     # Projected data
     if projected:
@@ -331,6 +352,80 @@ def create_1rm_trajectory_chart(
         yaxis=dict(title="Estimated 1RM (kg)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         margin=dict(b=80),
+    )
+
+    return fig
+
+
+def create_exercise_volume_chart(
+    exercises: list[dict],
+    title: str = "Top Exercises by Volume",
+    height: int = 400,
+) -> go.Figure:
+    """
+    Create a chart showing top exercises by total volume.
+
+    Args:
+        exercises: List of dicts with name, muscle_group, total_volume, session_count
+        title: Chart title
+        height: Chart height
+
+    Returns:
+        Plotly figure
+    """
+    if not exercises:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No exercise volume data",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5, showarrow=False,
+        )
+        fig.update_layout(height=height, title=title, template="plotly_dark")
+        return fig
+
+    names = [e["name"] for e in exercises]
+    volumes = [e["total_volume"] for e in exercises]
+    sessions = [e["session_count"] for e in exercises]
+    muscles = [e["muscle_group"] for e in exercises]
+
+    # Color by muscle group
+    muscle_colors = {
+        "Chest": "#FF6B6B",
+        "Back": "#4ECDC4",
+        "Shoulders": "#45B7D1",
+        "Biceps": "#FFA07A",
+        "Triceps": "#98D8C8",
+        "Forearms": "#F7DC6F",
+        "Quads": "#BB8FCE",
+        "Hamstrings": "#85C1E2",
+        "Glutes": "#F8B88B",
+        "Calves": "#A9DFBF",
+    }
+
+    colors = [muscle_colors.get(m, "#95A5A6") for m in muscles]
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Bar(
+            y=names, x=volumes,
+            orientation="h",
+            marker_color=colors,
+            text=[f"{int(v):,} kg" for v in volumes],
+            textposition="auto",
+            hovertemplate="<b>%{y}</b><br>Volume: %{x:,.0f} kg<br>Sessions: %{customdata}<extra></extra>",
+            customdata=sessions,
+        )
+    )
+
+    fig.update_layout(
+        title=title,
+        height=height,
+        template="plotly_dark",
+        xaxis=dict(title="Total Volume (kg)"),
+        yaxis=dict(title="Exercise"),
+        showlegend=False,
+        margin=dict(l=150),
     )
 
     return fig

@@ -133,13 +133,14 @@ def detect_plateau(
     return is_plateau and weeks_in_plateau >= threshold_weeks, weeks_in_plateau
 
 
-def analyze_progression(history: list[dict], weeks: int = 12) -> ProgressionAnalysis:
+def analyze_progression(history: list[dict], weeks: int = 12, trend_weeks: int = 4) -> ProgressionAnalysis:
     """
     Analyze exercise progression over time.
 
     Args:
         history: Workout history from QueryService.get_exercise_history()
-        weeks: Number of weeks to analyze
+        weeks: Number of weeks to analyze (display window)
+        trend_weeks: Number of weeks to use for trend calculation (default 4)
 
     Returns:
         ProgressionAnalysis with trend information
@@ -198,26 +199,43 @@ def analyze_progression(history: list[dict], weeks: int = 12) -> ProgressionAnal
             recommendation="Need more workouts for trend analysis.",
         )
 
-    # Calculate trend
-    slope, intercept, r_squared = calculate_trend(dates, max_weights)
+    # Calculate trend using only the last trend_weeks of data
+    from datetime import timedelta
+    if dates:
+        cutoff_date = dates[-1] - timedelta(weeks=trend_weeks)
+        trend_dates = [d for d in dates if d >= cutoff_date]
+        trend_weights = [max_weights[i] for i, d in enumerate(dates) if d >= cutoff_date]
+    else:
+        trend_dates = dates
+        trend_weights = max_weights
 
-    # Calculate metrics
-    start_weight = max_weights[0]
-    current_weight = max_weights[-1]
+    if len(trend_dates) >= 2:
+        slope, intercept, r_squared = calculate_trend(trend_dates, trend_weights)
+    else:
+        slope, intercept, r_squared = 0, (trend_weights[0] if trend_weights else 0), 0
+
+    # Calculate metrics from trend period (last N weeks) for consistency
+    if trend_weights:
+        start_weight = trend_weights[0]
+        current_weight = trend_weights[-1]
+    else:
+        start_weight = max_weights[0]
+        current_weight = max_weights[-1]
+
     weight_change = current_weight - start_weight
     weight_change_percent = (weight_change / start_weight * 100) if start_weight > 0 else 0
 
-    weeks_analyzed = max(1, (dates[-1] - dates[0]).days // 7)
+    weeks_analyzed = len(trend_dates) if trend_dates else max(1, (dates[-1] - dates[0]).days // 7)
 
     # Detect plateau
     is_plateau, plateau_weeks = detect_plateau(history)
 
-    # Determine trend
+    # Determine trend based on actual weight change (not just slope)
     if is_plateau:
         trend = "plateau"
-    elif slope > 0.5:  # More than 0.5kg/week improvement
+    elif weight_change_percent > 5:  # More than 5% improvement
         trend = "improving"
-    elif slope < -0.5:  # More than 0.5kg/week decline
+    elif weight_change_percent < -5:  # More than 5% decline
         trend = "declining"
     else:
         trend = "stable"

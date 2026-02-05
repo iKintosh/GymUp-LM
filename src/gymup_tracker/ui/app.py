@@ -14,7 +14,6 @@ from gymup_tracker.llm.client import get_ollama_status, get_installation_instruc
 from gymup_tracker.ui.views.dashboard import render_dashboard
 from gymup_tracker.ui.views.programs import render_programs
 from gymup_tracker.ui.views.exercises import render_exercises
-from gymup_tracker.ui.views.analytics import render_analytics
 
 
 def get_db_path() -> Path:
@@ -96,7 +95,7 @@ def main():
         # Navigation
         page = st.radio(
             "Navigation",
-            ["Dashboard", "Programs", "Exercises", "Analytics", "Settings"],
+            ["Dashboard", "Programs", "Exercises", "Settings"],
             label_visibility="collapsed",
         )
 
@@ -167,8 +166,6 @@ def main():
         render_programs(str(db_path))
     elif page == "Exercises":
         render_exercises(str(db_path))
-    elif page == "Analytics":
-        render_analytics(str(db_path))
     elif page == "Settings":
         render_settings(llm_status)
 

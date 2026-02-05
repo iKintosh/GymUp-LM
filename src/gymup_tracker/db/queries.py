@@ -95,16 +95,43 @@ class QueryService:
                 .first()
             )
 
-    def get_exercises_for_day(self, day_id: int) -> list[Exercise]:
-        """Get all exercises for a day."""
+    def get_exercises_for_day(self, day_id: int) -> list[dict]:
+        """Get all exercises for a day with template data."""
         with self._get_session() as session:
-            return (
+            exercises = (
                 session.query(Exercise)
                 .options(joinedload(Exercise.template))
                 .filter(Exercise.day_id == day_id)
                 .order_by(Exercise.order_num)
                 .all()
             )
+
+            # Convert to dicts to avoid session detachment issues
+            result = []
+            for ex in exercises:
+                template = ex.template
+                if template:
+                    # Get display name with fallback for unnamed exercises
+                    if template.name:
+                        display_name = template.name.strip()
+                    else:
+                        muscle = get_muscle_name(template.mainMuscleWorked)
+                        equipment = get_equipment_name(template.equipment)
+                        display_name = f"{muscle} ({equipment})"
+                else:
+                    display_name = "Unknown Exercise"
+
+                result.append({
+                    "id": ex.id,
+                    "template_id": ex.th_exercise_id,
+                    "template_name": display_name,
+                    "rest_time": ex.restTime,
+                    "rest_time_after": ex.restTimeAfterExercise,
+                    "order": ex.order_num,
+                    "is_measure_weight": ex.isMeasureWeight,
+                    "is_measure_reps": ex.isMeasureReps,
+                })
+            return result
 
     # Training queries
     def get_all_trainings(self, limit: int = 100, performed_only: bool = True) -> list[Training]:
@@ -204,14 +231,16 @@ class QueryService:
             history = []
             for workout in workouts:
                 # Fetch sets separately to avoid eager loading issues
+                # Skip warm-up sets (hard_sense <= 1) and round weights
                 sets_data = [
                     {
-                        "weight": s.weight,
+                        "weight": round(s.weight, 1) if s.weight else 0,
                         "reps": int(s.reps) if s.reps else 0,
                         "rpe": s.hard_sense,
                         "order": s.id,
                     }
                     for s in list(workout.sets)
+                    if not (s.hard_sense is not None and s.hard_sense == 1)  # Skip warm-ups
                 ]
 
                 history.append({
@@ -376,26 +405,22 @@ class QueryService:
             }
 
     def get_used_exercises(self) -> list[ThExercise]:
-        """Get exercises that have been used in workouts."""
+        """Get exercises that have been used in workouts, sorted by frequency (most used first)."""
         with self._get_session() as session:
-            used_ids = (
-                session.query(Workout.th_exercise_id)
-                .distinct()
+            # Get exercises with their usage count, sorted by frequency
+            exercise_counts = (
+                session.query(
+                    ThExercise,
+                    func.count(Workout.id).label('usage_count')
+                )
+                .join(Workout, ThExercise.id == Workout.th_exercise_id)
+                .group_by(ThExercise.id)
+                .order_by(desc(func.count(Workout.id)), ThExercise.name)
                 .all()
             )
-            used_ids = [id[0] for id in used_ids if id[0]]
 
-            exercises = (
-                session.query(ThExercise)
-                .filter(ThExercise.id.in_(used_ids))
-                .all()
-            )
-
-            # Sort by name, putting named exercises first
-            return sorted(
-                exercises,
-                key=lambda e: (0 if e.name else 1, e.name or f"Exercise #{e.id}")
-            )
+            # Extract just the exercises (they're tuples of (exercise, count))
+            return [ex[0] for ex in exercise_counts]
 
     def get_muscle_volume_distribution(self, weeks: int = 4) -> dict[str, float]:
         """Get volume distribution by muscle group over past N weeks (performed only)."""
@@ -421,3 +446,303 @@ class QueryService:
                     volume_by_muscle[muscle] = volume_by_muscle.get(muscle, 0) + (workout.tonnage or 0)
 
             return volume_by_muscle
+
+    def get_top_exercises_by_volume(self, weeks: int = 4, limit: int = 10) -> list[dict]:
+        """Get top exercises by total volume in past N weeks (performed only)."""
+        with self._get_session() as session:
+            cutoff = datetime.now() - timedelta(weeks=weeks)
+            cutoff_ms = datetime_to_ms(cutoff)
+
+            # Query workouts with exercise info and volume, group by exercise
+            results = (
+                session.query(
+                    ThExercise,
+                    func.sum(Workout.tonnage).label('total_volume'),
+                    func.count(Workout.id).label('session_count')
+                )
+                .join(Workout, ThExercise.id == Workout.th_exercise_id)
+                .join(Training, Workout.training_id == Training.id)
+                .filter(
+                    Training.startDateTime >= cutoff_ms,
+                    Training.finishDateTime > 0,
+                )
+                .group_by(ThExercise.id)
+                .order_by(desc(func.sum(Workout.tonnage)))
+                .limit(limit)
+                .all()
+            )
+
+            return [
+                {
+                    "name": ex.name,
+                    "muscle_group": get_muscle_name(ex.mainMuscleWorked) if ex.mainMuscleWorked else "Unknown",
+                    "total_volume": vol or 0,
+                    "session_count": count or 0,
+                }
+                for ex, vol, count in results
+            ]
+
+    def get_program_stats(self, program_id: int, weeks: int = 4) -> dict:
+        """Get statistics for a specific program (performed workouts only)."""
+        with self._get_session() as session:
+            # Total stats (all time)
+            all_trainings = (
+                session.query(Training)
+                .join(Day, Training.day_id == Day.id)
+                .filter(Day.program_id == program_id, Training.finishDateTime > 0)
+                .all()
+            )
+
+            total_volume = sum(t.tonnage or 0 for t in all_trainings)
+            total_workouts = len(all_trainings)
+
+            # This week/month stats
+            cutoff_week = datetime.now() - timedelta(weeks=1)
+            cutoff_month = datetime.now() - timedelta(weeks=4)
+            cutoff_week_ms = datetime_to_ms(cutoff_week)
+            cutoff_month_ms = datetime_to_ms(cutoff_month)
+
+            week_trainings = [
+                t for t in all_trainings
+                if t.startDateTime and t.startDateTime >= cutoff_week_ms
+            ]
+            week_volume = sum(t.tonnage or 0 for t in week_trainings)
+
+            month_trainings = [
+                t for t in all_trainings
+                if t.startDateTime and t.startDateTime >= cutoff_month_ms
+            ]
+            month_volume = sum(t.tonnage or 0 for t in month_trainings)
+
+            # Get all days in program
+            days = session.query(Day).filter(Day.program_id == program_id).order_by(Day.order_num).all()
+            day_count = len(days)
+
+            # Get last training date
+            last_training = max(
+                (t for t in all_trainings if t.start_datetime),
+                key=lambda t: t.start_datetime,
+                default=None
+            )
+
+            return {
+                "program_id": program_id,
+                "total_workouts": total_workouts,
+                "total_volume": total_volume,
+                "week_workouts": len(week_trainings),
+                "week_volume": week_volume,
+                "month_workouts": len(month_trainings),
+                "month_volume": month_volume,
+                "days_in_program": day_count,
+                "last_workout_date": last_training.start_datetime if last_training else None,
+                "avg_workouts_per_week": round(total_workouts / max(1, weeks), 1) if total_workouts > 0 else 0,
+            }
+
+    def get_day_exercise_data(self, day_id: int) -> dict:
+        """
+        Get exercises for a day with comprehensive performance data.
+
+        Includes ALL historical data for each exercise template (th_exercise_id),
+        regardless of which program/day it was performed in.
+        """
+        from datetime import datetime, timedelta
+
+        with self._get_session() as session:
+            day = session.query(Day).filter(Day.id == day_id).first()
+            if not day:
+                return {}
+
+            # Get exercises for this day
+            exercises_list = (
+                session.query(Exercise)
+                .filter(Exercise.day_id == day_id)
+                .order_by(Exercise.order_num)
+                .all()
+            )
+
+            exercises = []
+            for ex in exercises_list:
+                template = ex.template
+                if not template:
+                    continue
+
+                # Get proper display name
+                if template.name:
+                    display_name = template.name.strip()
+                else:
+                    muscle = get_muscle_name(template.mainMuscleWorked)
+                    equipment = get_equipment_name(template.equipment)
+                    display_name = f"{muscle} ({equipment})"
+
+                # Get last 8 weeks of workouts for trend analysis
+                # This includes ALL sessions for this exercise, not just this program
+                cutoff_8w = datetime.now() - timedelta(weeks=8)
+                cutoff_8w_ms = datetime_to_ms(cutoff_8w)
+
+                recent_workouts = (
+                    session.query(Workout)
+                    .join(Training)
+                    .filter(
+                        Workout.th_exercise_id == template.id,
+                        Training.finishDateTime > 0,
+                        Training.startDateTime >= cutoff_8w_ms
+                    )
+                    .order_by(Training.startDateTime)
+                    .all()
+                )
+
+                # Get ALL-TIME PR (not just recent)
+                all_time_pr = (
+                    session.query(Set.weight)
+                    .join(Workout)
+                    .join(Training)
+                    .filter(
+                        Workout.th_exercise_id == template.id,
+                        Training.finishDateTime > 0,
+                        Set.weight.isnot(None)
+                    )
+                    .order_by(Set.weight.desc())
+                    .first()
+                )
+                all_time_pr_weight = all_time_pr[0] if all_time_pr else None
+
+                # Collect detailed stats from recent workouts
+                session_data = []  # Per-session data for trend analysis
+                all_weights = []
+                all_reps = []
+                total_sets_8w = 0
+
+                for w in recent_workouts:
+                    session_weights = []
+                    session_reps = []
+                    session_volume = 0
+
+                    for s in w.sets:
+                        # Skip warm-up sets (hard_sense <= 1 means very easy / warm-up)
+                        if s.hard_sense is not None and s.hard_sense == 1:
+                            continue
+
+                        if s.weight:
+                            # Round to avoid floating point precision issues
+                            weight_rounded = round(s.weight, 1)
+                            session_weights.append(weight_rounded)
+                            all_weights.append(weight_rounded)
+                        if s.reps:
+                            session_reps.append(int(s.reps))
+                            all_reps.append(int(s.reps))
+                        if s.weight and s.reps:
+                            session_volume += s.weight * s.reps
+                        total_sets_8w += 1
+
+                    if session_weights:
+                        max_weight = max(session_weights)
+                        avg_reps = sum(session_reps) / len(session_reps) if session_reps else 0
+                        # Epley formula for estimated 1RM
+                        e1rm = max_weight * (1 + avg_reps / 30) if avg_reps > 0 else max_weight
+
+                        session_data.append({
+                            "date": w.training.start_datetime,
+                            "max_weight": max_weight,
+                            "avg_reps": avg_reps,
+                            "volume": session_volume,
+                            "sets_count": len(session_weights),
+                            "estimated_1rm": round(e1rm, 1),
+                        })
+
+                # Calculate trend using session max weights (more accurate)
+                trend = "no_data"
+                weight_change = 0
+                weight_change_pct = 0
+
+                if len(session_data) >= 3:
+                    # Compare first 3 sessions vs last 3 sessions
+                    first_weights = [s["max_weight"] for s in session_data[:3]]
+                    last_weights = [s["max_weight"] for s in session_data[-3:]]
+                    first_avg = sum(first_weights) / len(first_weights)
+                    last_avg = sum(last_weights) / len(last_weights)
+
+                    weight_change = last_avg - first_avg
+                    weight_change_pct = ((last_avg - first_avg) / first_avg * 100) if first_avg > 0 else 0
+
+                    if weight_change_pct > 5:
+                        trend = "improving"
+                    elif weight_change_pct < -5:
+                        trend = "declining"
+                    elif abs(weight_change_pct) <= 2:
+                        trend = "plateau"
+                    else:
+                        trend = "stable"
+                elif len(session_data) >= 1:
+                    trend = "insufficient_data"
+
+                # Get last 3 sessions for detailed history
+                last_3_sessions = []
+                for s in session_data[-3:]:
+                    last_3_sessions.append({
+                        "date": s["date"],
+                        "weight": s["max_weight"],
+                        "avg_reps": round(s["avg_reps"], 1),
+                        "volume": round(s["volume"], 0),
+                        "estimated_1rm": s["estimated_1rm"],
+                    })
+
+                # Get the most recent workout sets (excluding warm-ups)
+                last_sets = []
+                if recent_workouts:
+                    last_workout = recent_workouts[-1]
+                    last_sets = [
+                        {
+                            "weight": round(s.weight, 1) if s.weight else 0,
+                            "reps": int(s.reps) if s.reps else 0,
+                            "rpe": s.hard_sense
+                        }
+                        for s in last_workout.sets
+                        # Skip warm-up sets (hard_sense <= 1)
+                        if not (s.hard_sense is not None and s.hard_sense == 1)
+                    ]
+
+                last_weight = max((s["weight"] for s in last_sets if s["weight"]), default=None) if last_sets else None
+                if last_weight:
+                    last_weight = round(last_weight, 1)
+                last_avg_reps = sum(s["reps"] for s in last_sets) / len(last_sets) if last_sets else 0
+
+                # Calculate current estimated 1RM
+                estimated_1rm = None
+                if last_weight and last_avg_reps > 0:
+                    estimated_1rm = round(last_weight * (1 + last_avg_reps / 30), 1)
+
+                # Weekly volume (sets per week over 8 weeks)
+                weeks_with_data = len(set(s["date"].isocalendar()[1] for s in session_data)) if session_data else 0
+                avg_sets_per_week = round(total_sets_8w / max(weeks_with_data, 1), 1)
+
+                exercises.append({
+                    "id": template.id,
+                    "name": display_name,
+                    "muscle_group": get_muscle_name(template.mainMuscleWorked),
+                    "equipment": get_equipment_name(template.equipment),
+                    "rest_time": ex.restTime or 180,
+                    # Current performance
+                    "last_weight": last_weight,
+                    "last_avg_reps": round(last_avg_reps, 1),
+                    "last_sets": last_sets,
+                    "estimated_1rm": estimated_1rm,
+                    # Historical data
+                    "last_3_sessions": last_3_sessions,
+                    "sessions_count_8w": len(recent_workouts),
+                    "total_sets_8w": total_sets_8w,
+                    "avg_sets_per_week": avg_sets_per_week,
+                    # Trend analysis
+                    "trend": trend,
+                    "weight_change": round(weight_change, 1),
+                    "weight_change_pct": round(weight_change_pct, 1),
+                    # PRs
+                    "pr_weight_8w": max(all_weights) if all_weights else None,
+                    "all_time_pr": all_time_pr_weight,
+                })
+
+            return {
+                "day_id": day_id,
+                "day_name": day.name,
+                "program_id": day.program_id,
+                "exercises": exercises,
+            }

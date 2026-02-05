@@ -86,7 +86,7 @@ def render_exercises(db_path: str):
     # Tabs for different views
     tab1, tab2, tab3 = st.tabs(["Progression", "AI Analysis", "History"])
 
-    # Get workout history
+    # Get workout history (12 weeks for full view, but trend uses last 4)
     history = query.get_exercise_history(selected_exercise.id, weeks=12)
 
     with tab1:
@@ -200,22 +200,30 @@ def render_exercises(db_path: str):
                 # Display suggestion
                 suggested = result.get("suggested_weight")
                 if suggested:
-                    st.success(f"**Recommended: {suggested} kg**")
+                    # Check if AI provided structured recommendation
+                    if result.get("ai_short_answer") and not result.get("parsing_failed"):
+                        # Use AI recommendation if available
+                        st.success(f"✅ **Recommended: {result['ai_short_answer']}**")
+                        with st.expander("💡 Reasoning"):
+                            st.markdown(result.get("ai_reasoning", ""))
+                    else:
+                        # Fallback to rule-based
+                        st.success(f"**Recommended: {suggested} kg**")
+                        with st.expander("📊 Analysis"):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Last Weight", f"{result.get('last_weight', 'N/A')} kg")
+                            with col2:
+                                st.metric("Last Reps", result.get("last_avg_reps", "N/A"))
+                            st.markdown(result.get("rule_based_reasoning", ""))
 
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Last Weight", f"{result.get('last_weight', 'N/A')} kg")
-                    with col2:
-                        st.metric("Last Reps", result.get("last_avg_reps", "N/A"))
-                    with col3:
-                        st.metric("Confidence", result.get("confidence", "N/A").title())
-
-                    st.markdown("#### Reasoning")
-                    st.info(result.get("rule_based_reasoning", ""))
-
-                    if result.get("llm_suggestion"):
-                        st.markdown("#### AI Recommendation")
-                        st.markdown(result["llm_suggestion"])
+                    # Always show last session info
+                    with st.expander("📋 Last Session"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Last Weight", f"{result.get('last_weight', 'N/A')} kg")
+                        with col2:
+                            st.metric("Last Reps", result.get("last_avg_reps", "N/A"))
                 else:
                     st.warning("Could not generate weight suggestion.")
 
